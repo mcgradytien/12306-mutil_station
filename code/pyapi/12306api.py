@@ -1,0 +1,508 @@
+#!usr/bin/env python
+# -*- encoding:utf-8 -*-
+
+# @name  : 12306api
+# @author: tian
+# @date  : 2018/3/19 0019
+# @des   : '''12306接口访问'''
+
+from StationData import stations_dict
+
+import requests
+import sys
+from datetime import datetime, timedelta
+
+reload(sys)
+sys.setdefaultencoding("utf8")
+
+# 关闭https证书验证警告
+requests.packages.urllib3.disable_warnings()
+
+# 城市名代码查询字典
+# key：城市名 value：城市代码
+
+# 反转k，v形成新的字典
+code_dict = {v: k for k, v in stations_dict.items()}
+
+
+# 计算时间差 1
+def calc_time_gap(delta_time, t1, t2):
+	"""
+	:param delta_time: 时间间隔
+	:param t1: 当前车次时间
+	:param t2: list当中已经存储的时间
+	:return: True or False
+	"""
+	delta_time = delta_time * 3600
+	gap = abs(t1 - t2)
+	if gap.seconds > delta_time:
+		return False
+	if gap.seconds <= delta_time:
+		return True
+
+
+# time 和 list 做计算，如果最大差值 大于 delta_time ，return False 1
+def calc_time_gap_list(delta_time, list_, t):
+	"""
+	:param delta_time: 时间差
+	:param list_: 已经符合要求的车次列表
+	:param t: 轮询的车次时间
+	:return: 如果 发现有 大于 delta_time的就直接返回 false
+	"""
+	for list__ in list_:
+		for cc in list__:
+			if calc_time_gap(delta_time, cc[6], t):
+				continue
+			else:
+				return False
+	return True
+
+
+# 结果写入文件 0
+def write_result_to_file(datalist, fpath):
+	"""
+	:param datalist:  数据文件格式
+	:return: None
+	"""
+	str_list = []
+	for list_ in datalist:
+		for da in list_:
+			if len(da) == 0:
+				str_ = 'NUll'
+				str_list.append(str_)
+			if len(da) != 0 and type(da[0]) is list:
+				for d in da:
+					str_ = ''
+					for i in range(len(d)):
+						if type(d[i]) is not unicode:
+							d[i] = str(d[i]).decode("utf-8")
+						str_ = str_ + "/" + d[i]
+					str_list.append(str_)
+			if len(da) != 0 and type(da[0]) is not list:
+				str_ = ''
+				for i in range(len(da)):
+					if type(da[i]) is not unicode:
+						da[i] = str(da[i]).decode("utf-8")
+					str_ = str_ + "/" + da[i]
+				str_list.append(str_)
+		str_list.append("-------------------------------------------")
+
+	with open(fpath, 'w') as f:
+		for s in str_list:
+			f.write(s.encode("utf-8-sig") + '\n')
+
+
+# 根据日期和 xx:xx 生成格式化时间 0
+def format_time(date_, time_):
+	"""
+	:param date_: 出发日期
+	:param time_: 到达或者出发时间
+	:return:  返回标准时间对象
+	"""
+	if type(date_) is not unicode:
+		date_ = date_.decode("utf-8").split("-")
+	time_ = time_.decode("utf-8").split(":")
+	time_list = date_ + time_
+	ts = [int(x) for x in time_list]
+	dt = datetime(ts[0], ts[1], ts[2], ts[3], ts[4])
+	return dt
+
+
+# 获取到达时间
+def get_arriva_time(start_time, time_last):
+	_list = time_last.decode("utf-8").split(":")
+	_time = start_time + timedelta(hours=int(_list[0]), minutes=int(_list[1]))
+	return _time
+
+
+# 删除list当中指定index元素，返回列表 1
+def del_atom_from_list(list_, index):
+	"""
+	删除 list_ 当中索引为 index 的数据
+	:param list_:
+	:param index:
+	:return:
+	"""
+	if index == 0:
+		result = list_[1:]
+	if index == len(list_):
+		result = list_[:-1]
+	if 0 < index < len(list_):
+		result = list_[0:index] + list_[index + 1:]
+	return result
+
+
+# 提取始发站的所有车站代号和name
+def get_start_station_dict(all_result):
+	return_dic = {}
+	n_temp = []
+	c_temp = []
+	for data in all_result:
+		n_dic = {}
+		n_list = []
+		c_dic = {}
+		c_list = []
+		for da in data:
+			name = da[2]
+			code = da[1]
+			if not n_dic.has_key(name):
+				n_dic[name] = ''
+				n_list.append(name)
+			if not c_dic.has_key(code):
+				c_dic[code] = ''
+				c_list.append(code)
+		n_temp.append(n_list)
+		c_temp.append(c_list)
+	return_dic['names'] = n_temp
+	return_dic['codes'] = c_temp
+	return return_dic
+
+
+# 获取 url 地址 0
+def get_query_url(text):
+	"""
+	返回调用api的url链接
+	"""
+	# 解析参数 args[0]里是固定字符串：车票查询 用于匹配公众号接口
+	args = text.split(',')
+	try:
+		date = args[0]
+		from_station_name = args[1]
+		to_station_name = args[2]
+		from_station = stations_dict[from_station_name]
+		to_station = stations_dict[to_station_name]
+	except Exception as e:
+		date, from_station, to_station = '--', '--', '--'
+		# 将城市名转换为城市代码
+
+	# api url 构造
+	# https://kyfw.12306.cn/otn/leftTicket/queryO?leftTicketDTO.train_date=2018-03-20&leftTicketDTO.from_station=BJP&leftTicketDTO.to_station=SHH&purpose_codes=ADULT
+	# https://kyfw.12306.cn/otn/leftTicket/queryO?leftTicketDTO.train_date=2018-03-23&leftTicketDTO.from_station=WHN&leftTicketDTO.to_station=SZQ&purpose_codes=ADULT
+	url = (
+		'http://kyfw.12306.cn/otn/leftTicket/query?'
+		'leftTicketDTO.train_date={}&'
+		'leftTicketDTO.from_station={}&'
+		'leftTicketDTO.to_station={}&'
+		'purpose_codes=ADULT'
+	).format(date, from_station, to_station)
+	# print(url)
+	return url
+
+
+# 查询车次信息 0
+def query_train_info(url):
+	"""
+	查询火车票信息：
+	返回 信息查询列表
+	"""
+	headers = {
+		"Host": 'kyfw.12306.cn',
+		'Upgrade-Insecure-Requests': '1',
+		'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; WOW64) AppleWebKit/537.36 (KHTML, like Gecko) '
+		              'Chrome/64.0.3282.140 Safari/537.36',
+		'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+		'Accept-Language': 'zh-CN,zh;q=0.8,en-US;q=0.5,en;q=0.3',
+		'Accept-Encoding': 'gzip, deflate',
+		'Connection': 'keep-alive',
+		'Cache-Control': 'max-age=0'
+	}
+	# 代理信息
+	proxies = {
+		"https": "186.208.109.229:20183",
+		"https": '120.78.78.141:8888'
+	}
+	date = url.split("&")[0][-10:]
+	info_list = []
+	detail_list = []
+	try:
+		# r = requests.get(url, verify=False, headers=headers, proxies=proxies)
+		r = requests.get(url, verify=False, headers=headers)
+		# 获取返回的json数据里的data字段的result结果
+		raw_trains = r.json()['data']['result']
+
+		for raw_train in raw_trains:
+			if u'列车停运' in raw_train:
+				continue
+			# 循环遍历每辆列车的信息
+			data_list = raw_train.split('|')
+
+			# 车次号码
+			train_no = data_list[3]
+			# 出发站
+			from_station_code = data_list[6]
+			from_station_name = code_dict[from_station_code]
+			# 终点站
+			to_station_code = data_list[7]
+			to_station_name = code_dict[to_station_code]
+			# 出发时间
+			start_time = format_time(date, data_list[8])
+			# 总耗时
+			time_fucked_up = data_list[10]
+			# 到达时间
+			arrive_time = get_arriva_time(start_time, time_fucked_up)
+			# 一等座
+			first_class_seat = data_list[31] or '--'
+			# 二等座
+			second_class_seat = data_list[30] or '--'
+			# 软卧
+			soft_sleep = data_list[23] or '--'
+			# 硬卧
+			hard_sleep = data_list[28] or '--'
+			# 硬座
+			hard_seat = data_list[29] or '--'
+			# 无座
+			no_seat = data_list[26] or '--'
+
+			templist = [train_no, from_station_code, from_station_name, to_station_code, to_station_name,
+			            start_time, arrive_time, time_fucked_up, first_class_seat, second_class_seat,
+			            soft_sleep, hard_sleep, hard_seat, no_seat]
+
+			# 打印查询结果
+			info = (
+				'车次:{}\n出发站:{}\n目的地:{}\n出发时间:{}\n到达时间:{}\n消耗时间:{}\n座位情况：\n 一等座：「{}」\n'
+				'二等座：「{}」\n软卧：「{}」\n硬卧：「{}」\n硬座：「{}」\n无座：「{}」\n\n'.format(
+					train_no, from_station_name, to_station_name, start_time, arrive_time, time_fucked_up,
+					first_class_seat, second_class_seat, soft_sleep, hard_sleep, hard_seat, no_seat))
+
+			info_list.append(info)
+			detail_list.append(templist)
+
+		# return info_list,detail_list
+		return detail_list
+	except Exception as e:
+		return None
+
+
+# 多站查询 0
+def mutil_from_query(*stations):
+	"""
+	:param stations: 输入站点
+	:return: 返回站点信息
+	"""
+	station_list = []
+	for s in stations:
+		for i in s:
+			station_list.append(i)
+	_date = station_list[0]  # xxxx-xx-xx
+	from_ = station_list[1:-1]  #
+	to_station = station_list[-1]  #
+	# 不同出发点到同一个站点的查询url列表
+	url_list = []
+	for s in from_:
+		text = _date + "," + s + "," + to_station
+		url = get_query_url(text)
+		url_list.append(url)
+
+	# 单线程跑获取所有结果
+	all_result = []
+	for url in url_list:
+		query_result = query_train_info(url)
+		all_result.append(query_result)
+	return all_result  # all query result
+
+
+# 对列表进行过滤, 满足 时间差距的数据保留下来 1
+def filter_sec_list(list_, delta_time):
+	"""
+	:param list_:
+	:param delta_time:
+	:return:
+	"""
+	if len(list_) == 1:
+		return list_
+	if len(list_) == 0:
+		return list_
+	if len(list_) > 1:
+		base_list = list_[0]
+		other_list = list_[1:]
+		confirm_list = []
+		confirm_list.append(base_list)
+		for other in other_list:
+			o_list = []
+			for cc in other:
+				t = cc[6]
+				r = calc_time_gap_list(delta_time, confirm_list, t)
+				if r:
+					o_list.append(cc)
+			confirm_list.append(o_list)
+	return confirm_list
+
+
+# 根据时间区间来分割车次 1
+def split_by_time_section(less_list, time_section, other_list, delta_time):
+	"""
+	:param time_section: 时间区间
+	:param other_list: 其他车次列表
+	:return:  返回分割好的车次区间列表
+	"""
+	re_list = []
+	for section in time_section:  # 时间区间组  delta_time_section
+		sec_list = []
+		for other in other_list:  # Other List，参照组
+			templist = []
+			for i in other:
+				if section[1] <= i[6] <= section[0]:
+					templist.append(i)
+			sec_list.append(templist)
+		sec_list = filter_sec_list(sec_list, delta_time)  # 相互过滤
+		re_list.append(sec_list)
+	# 叠加原始车次
+	for i in range(len(less_list)):
+		re_list[i] = [less_list[i]] + re_list[i]
+		pass
+	return re_list
+
+
+# pre 0.1 逻辑  1
+def filter_by_time_section(query_params, delta_time):
+	"""
+	:param query_params:  查询参数
+	:param delta_time: 时间间隔（分钟）
+	:return:
+	"""
+	all_result = mutil_from_query(query_params)
+
+	# 提取车次数量最少的车站列表和索引
+	len_ = len(all_result[0])
+	index = 0
+	for i in range(len(all_result)):
+		if len_ <= len(all_result[i]):
+			continue
+		else:
+			len_ = len(all_result[i])
+			index = i
+	# 车站次数最少的站点 index
+	less_list = all_result[index]
+	# 除了index的其他车站
+	other_list = del_atom_from_list(all_result, index)  # 删除列表中指定索引的数据
+
+	# delta_time
+	# arr_time_index = 6
+	delta_time_list = []
+	for less in less_list:
+		temp_list = []
+		arr_time = less[6]
+		temp_list = [arr_time + timedelta(hours=delta_time), arr_time - timedelta(hours=delta_time)]
+		delta_time_list.append(temp_list)
+
+	# 计算落在指定区间的车次
+	result = split_by_time_section(less_list, delta_time_list, other_list, delta_time)
+
+	# 符合条件的结果写入到文件当中
+	fPath = ur"./pyapi/resultSection1.csv"
+	write_result_to_file(result, fPath)
+
+
+#  对一个区间的车次按照到达的先后顺序进行排序  2
+def sort_cnum_by_arr_time(list_):
+	"""
+	:param list_: 区间 车次 列表
+	:return: 按照到达时间排序的车次列表
+	"""
+	tdic = {}
+	tlist = []
+	for data in list_:
+		tdic[data[6]] = data
+		tlist.append(data[6])
+	tlist.sort()
+	re_list = [tdic[t] for t in tlist]
+	return re_list
+
+
+# 寻找一个区间车次的最早时间  2
+def get_early_time(list_):
+	"""
+	:param list_: 二维 list, 出发站 - 终点站之间的 车次 list  2
+	:return:
+	"""
+	index = 0
+	e_time = list_[0][6]
+	for i in range(len(list_)):
+		if list_[i][6] <= e_time:
+			e_time = list_[i][6]
+			index = i
+	return e_time
+
+
+# 对车次按照最早到到时间进行排序  2
+def sort_station_by_time(list_):
+	"""
+	:param list_:  三维 list
+	:return:
+	"""
+	# 对所有区间车次依次排序,按照时间次序排序
+	sorted_list = []
+	for i in range(len(list_)):
+		templist = sort_cnum_by_arr_time(list_[i])
+		sorted_list.append(templist)
+	return sorted_list
+
+
+# alpha 0.2 逻辑  2
+def filter_by_time_section2(query_params, delta_time):
+	# 所有车站查询结果
+	all_result = mutil_from_query(query_params)
+	# 获取所有车站的始发站的name和代号
+	all_name_dic = get_start_station_dict(all_result)
+	# 提取车次的最早时间
+	sorted_list = sort_station_by_time(all_result)
+	# 所有车次
+	all_list = []
+	for _list in sorted_list:
+		for i in _list:
+			all_list.append(i)
+	# 所有到达车次排序的结果
+	all_sorted_list = sort_cnum_by_arr_time(all_list)
+
+	# 获取 e_section_list, 时间区间列表，
+	e_section_list = []
+	import copy
+	for a in all_sorted_list:
+		templist = []
+		templist.append(a)
+		copye = copy.copy(a)  # 注意 应用和拷贝的区别
+		copye[6] = copye[6] + timedelta(hours=delta_time)
+		templist.append(copye)
+		e_section_list.append(templist)
+	# e_section_list = [[t1, t1+delta],[t2, t2+delta],...[tn, tn+delta]]
+	ok_list = []
+	for e in e_section_list:
+		e_name = e[0][2]
+		sec_list = []
+		sec_list.append(e[0])
+		for datalist in all_result:
+			count = 0
+			for data in datalist:
+				d_name = data[2]
+				if d_name == e_name or d_name in e_name or e_name in d_name:  # 出发站相同的过滤掉
+					continue
+				if e[0][6] <= data[6] <= e[1][6]:
+					count += 1
+					sec_list.append(data)
+			if len(sec_list) == 0:
+				sec_list.append([u'null'])
+		# 过滤一下 sec_list 当中城市数量不足的现象
+		if len(sec_list) < 4:  # 简单过滤
+			continue
+		# 深度过滤
+		s_name_list = all_name_dic['names']
+
+		index_list = set()
+		for sec in sec_list:
+			for i in range(len(s_name_list)):
+				if sec[2] in s_name_list[i]:
+					index_list.add(i)
+					continue
+		if len(index_list) != len(s_name_list):
+			continue
+		ok_list.append(sec_list)
+
+	fPath = ur"./results.csv"
+	write_result_to_file(ok_list, fPath)
+
+
+if __name__ == '__main__':
+	queryList = [ur'2018-05-31', ur'长沙', ur'宜昌', ur'上海', ur"广州", ur"武汉"]
+	# result = mutil_from_query(queryList)
+	# filter_by_time_section(queryList, 0.25)
+	filter_by_time_section2(queryList, 1)
